@@ -1,3 +1,4 @@
+// TODO проверка разрешающей способности датчика температуры. по умолчанию 12 бит. если уменьшать, то необходимо считывать этот параметр и при необходимости записывать в датчик при каждом включении
 #include <Arduino.h>
 #include "avr/wdt.h" // подключаем watch dog таймер
 #include <OneWire.h>
@@ -18,6 +19,17 @@ enum StateWork //перечисление рабочих состояний
 StateWork current_state;  // переменная рабочих состояний
 StateWork previous_state; // переменная предыдущего состояния
 byte entry;               //флаг=1 при входе автомата в новое состояние
+//--------------------------------перечисление событий блокировки
+enum StateBlock
+{
+  blockCrc, //несовпадает CRC код датчика температуры
+  blockDs18b20, //датчик температуры не той системы
+  blockSdCreate, // не могу создать файл на сд карте
+  blockSdOpen,   // не могу открыть файл на sd карте
+  blockNone   // нет блокировки
+};
+StateBlock block_event;
+
 //--------------------------------переменные для таймеров
 #define MAX_TIMERS 4    //количество таймеров
 #define TEMPER_TIMER 0  //таймер опроса датчика температуры
@@ -70,6 +82,7 @@ enum TempCommunication //состояния общения с датчиком
 };
 TempCommunication temp_state; //переменаая состояния датчика температуры
 float temperature;            // переменная хранящая температуру
+byte temp_err = 0;           //  счетчик количества ошибок в температуре
 //------------------------------- переменные SD карты
 #define FILE_BASE_NAME "Data"           // общее название логов
 const uint8_t chipSelect = SS;          // пин выбора чипа SD.  !!!!!Отключить все остальное с шины SPI!!!!!.
@@ -77,8 +90,23 @@ SdFat sd;                               // создаем объект SD кар
 SdFile file;                            // Создаем объект лога.
 #define error(msg) sd.errorHalt(F(msg)) //Сообщения об ошибках, хранящиеся во флэш-памяти.
 
+StateBlock TempControlData (void) 
+{
+  byte temp_code[8]; //массив информации датчика температуры
+  ds.reset();
+  ds.write(0x33); //считать код подчненного устройства
+  for ( byte i = 0; i < 8; i++) {           // нам нужно 8 байтов
+    temp_code[i] = ds.read();
+  }
+  if ( ds.crc8( temp_code, 7) != temp_code[7] || temp_code[0]==0) return  blockCrc;  
+  if ( temp_code[0]=!0x28)  return  blockDs18b20; 
+  return blockNone;
+}
+
 void setup()
-{//си настройка АЦП
+{
+  
+  //си настройка АЦП
   ADCSRA |= (1 << ADPS2);                     //Биту ADPS2 присваиваем единицу - коэффициент деления 16
   ADCSRA &= ~ ((1 << ADPS1) | (1 << ADPS0));  //Битам ADPS1 и ADPS0 присваиваем нули
 //
@@ -95,14 +123,20 @@ void setup()
   Serial.begin(9600);
   current_state = kGetInput; // первое состояние- опрос входов
   temp_state = kSendRecuest;
+  //TODO бумкнуть задержку
+  block_event= TempControlData();// проверка подключенного датчика температуры
+  if (block_event != blockNone) {current_state=kBlocking;}// 
 }
+
+
+
 //---------------------------функции таймера
 void ProcessTimers(void) // прибавление к таймерам через интервал
 {
   process_timer_2 = millis();
     if ((process_timer_2 - process_timer_1) >= process_timer_interval)
   {
-     process_timer_1 = process_timer_2;
+    process_timer_1 = process_timer_2;
     for (byte i = 0; i < MAX_TIMERS; i++)
       if (timers_states[i] == TIMER_RUNNING)
         timers[i]++;
@@ -152,18 +186,17 @@ void servoPulse(int servoPin, int myAngle)
 
 void brasenham(void){
     modulator = setpoint + er; 
-     if (modulator < 50)
-       {
-         TRIAC_OFF;
-         er = modulator ; 
-       }
+    if (modulator < 50)
+      {
+        TRIAC_OFF;
+        er = modulator ; 
+      }
           else 
         {
           TRIAC_ON;
           er=modulator-100;
         }
 
-     
 
     /*
 * есть две глобальные переменные:
@@ -198,7 +231,6 @@ void loop()
     entry = 1;
   else
     entry = 0;           // если предыдущее состояние отличается от текущего-работаем по первому вхождению
- 
   switch (current_state) //<><><><><><><> ------------бегаем по состояниям
   {
   //-----------------------------------------------сон
@@ -206,18 +238,20 @@ void loop()
     if (entry) // первое вхождение
     {
       previous_state = current_state;
+     //1 Serial.println(current_state);
     }
 
     // Определяем температуру от датчика DS18b20
-    byte data[2];       // Место для значения температуры
+    // TODO вынести в отдельную функцию
+    byte data[9];       // Место для значения температуры
     switch (temp_state) // работаем с датчиком температуры
     {
     case kSendRecuest:          // отправляем запрос подготовить значение температуры
     //start_time=micros();//**
       ds.reset();               // Начинаем взаимодействие со сброса всех предыдущих команд и параметров
-            //   time_work=micros()-start_time;//**
-       // Serial.println(time_work);//**
-      ds.write(0xCC);           // Даем датчику DS18b20 команду пропустить поиск по адресу. В нашем случае только одно устрйоство
+      //   time_work=micros()-start_time;//**
+      // Serial.println(time_work);//**
+      ds.write(0xCC);           // обращение ко всем устройствам на шине
       ds.write(0x44);           // Даем датчику DS18b20 команду измерить температуру. Само значение температуры мы еще не получаем - датчик его положит во внутреннюю память
 
       temp_state = kGetAnsver;  // переходим в состояние получить ответ
@@ -230,23 +264,31 @@ void loop()
         ds.reset();
         ds.write(0xCC);
         ds.write(0xBE);      // Просим передать нам значение регистров со значением температуры
-        data[0] = ds.read(); // Читаем младший байт значения температуры
-        data[1] = ds.read(); // А теперь старший
+        for ( byte i = 0; i < 9; i++) {           // нам нужно 9 байтов
+          data[i] = ds.read();
+        }
+        if ( OneWire::crc8( data, 8) != data[8] || data[7]==0)  // контроль CRC и если примем нули
+        {
+          temp_err +=1; 
+          temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
+          if (temp_err ==3)    block_event = blockCrc;   // продолжается 3 итерации-уходим в блокировку
+          break;
+        }
+        block_event=blockNone;
+        temp_err=0;
         // Формируем итоговое значение:
         //    - сперва "склеиваем" значение,
         //    - затем умножаем его на коэффициент, соответсвующий разрешающей способности (для 12 бит по умолчанию - это 0,0625)
         temperature = ((data[1] << 8) | data[0]) * 0.0625;
         // Выводим полученное значение температуры в монитор порта
-        
         Serial.println(temperature);
-
         temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
       }
-
       break;
     }
-
+    if (block_event!=blockNone){current_state = kBlocking; break;}//если по датчику температуры получили блокировку, то дальше не идем
     // опрос переменника для для шим
+    // TODO медианный фильтр 
     pwm=analogRead(6); 
     setpoint=map(pwm, 0, 1023, 0, 100);
     //setpoint=50;
@@ -287,14 +329,12 @@ void loop()
     {
       const uint8_t BASE_NAME_SIZE = sizeof(FILE_BASE_NAME) - 1; // размер под общее имя лога
       char fileName[13] = FILE_BASE_NAME "00.csv";
-
       // Инициализировать на самой высокой скорости, поддерживаемой платой, которая
       // не более 50 МГц. Попробуйте снизить скорость, если возникают ошибки SPI.
       if (!sd.begin(chipSelect, SD_SCK_MHZ(16)))
       {
         sd.initErrorHalt();
       }
-
       // Поиск незанятого имени файла.
       if (BASE_NAME_SIZE > 6)
       {
@@ -315,12 +355,14 @@ void loop()
         {
           error("Can't create file name");
           current_state = kBlocking; //уходим в блокировку
+          block_event=blockSdCreate;
         }
       }
       if (!file.open(fileName, O_WRONLY | O_CREAT | O_EXCL))
       {
         error("file.open");
         current_state = kBlocking; //уходим в блокировку
+        block_event=blockSdOpen;
       }
       // записываем заголовок файла.
       writeHeader();
@@ -329,17 +371,19 @@ void loop()
       //logTime *= 1000UL*SAMPLE_INTERVAL_MS;
     }
     digitalWrite(RELAY, HIGH);    // включить реле
-    current_state = kMode; //уходим в работу по режиму
-    time_before_start=millis(); // запомнить время от которого пойдет отсчет в логе
+    time_before_start=millis();   // запомнить время от которого пойдет отсчет в логе
+    current_state = kMode;        //уходим в работу по режиму
+    
     break;
   //------------------------------------------------работа по режиму
-  case kMode:     // пид или ручник
+  case kMode:                 // пид или ручник
     if (entry)
     { // первое вхождение
       previous_state = current_state;
      // Serial.println(current_state);
     }
     StartTimer(TRIAC_TIMER);
+
     current_state = kPwm; //уходим в шим
     break;
   //------------------------------------------------вывод на шим
@@ -368,17 +412,17 @@ void loop()
     StartTimer(LOGGING_TIMER);                     //запускаем таймер записи новой строчки
     if (timers[LOGGING_TIMER] > time_interval_log) //если прошло время на подготовку ответа
     {
-     long log_time=(process_timer_2-time_before_start)/1000000UL;
-     //long log_time=(process_timer_2-time_before_start);
+      //long log_time=(process_timer_2-time_before_start)/1000000UL;
+      long log_time=(process_timer_2-time_before_start)/1000UL;
       file.print(log_time);
       file.write(',');
-      file.print(timers[LOGGING_TIMER]);
+      file.print(setpoint);
       //file.print(pwm);
       file.write(',');
       file.print(temperature);
       file.println();
      ///1 Serial.println("Log");
-     StopTimer(LOGGING_TIMER);
+      StopTimer(LOGGING_TIMER);
     }
     current_state = kGetInput; //уходим в опрос входов
     break;
@@ -388,10 +432,8 @@ void loop()
     { // первое вхождение
       //Serial.println(current_state);
     }
-    if (log_on)
-    {
-         file.close();   // закрываем файл лога
-    }
+    //TODO вынести в функцию, будет использоваться и в блокировке и в остановке
+    if (log_on)  file.close();   // закрываем файл лога
     StopTimer(TRIAC_TIMER);
     TRIAC_OFF;
     //-analogWrite(PWM_OUT, 0); //откл шим
@@ -404,10 +446,36 @@ void loop()
   case kBlocking:
     if (entry)
     { // первое вхождение
-   ///1   Serial.println(current_state);
+      previous_state = current_state;
+      Serial.print("BLOCK ");
+      temp_state = kSendRecuest;
+      is_work=false;
+      StopTimer(TEMPER_TIMER);
+      TRIAC_OFF;
+      digitalWrite(RELAY, LOW);    // выключает реле
     }
-    digitalWrite(RELAY, LOW);    // выключает реле
-     TRIAC_OFF;
+    switch (block_event)
+    {
+    case blockCrc:
+      //TODO опрос проблемных мест делать с задержкой , пусть пол секунды
+      Serial.print("CRC is not valid!\n");  //  CRC не корректен //? уйти в полную блокировку или сбросить программу и восстановить если приблема исчезнет.
+      block_event=TempControlData();
+      //TODO если ведется лог, то сделать запись об ошибке 
+      //? закрывать при этом файл или нет 
+      break;
+    case blockDs18b20:
+      Serial.print("not DS18B20\n");// тип датчика не 18b20
+      break;
+    case blockSdCreate:
+      break;
+    case blockSdOpen:
+      break;
+    case blockNone:
+      current_state = kGetInput;
+      break;
+    default:
+      break;
+    }
     break;
   default:
     break;
