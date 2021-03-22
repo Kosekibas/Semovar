@@ -35,6 +35,7 @@ StateBlock block_event;
 #define TEMPER_TIMER 0  //таймер опроса датчика температуры
 #define LOGGING_TIMER 1 //таймер записи данных на карту
 #define TRIAC_TIMER 2 //таймер выдачи импульса симистору
+#define BLOCK_TIMER 3 //таймер выдачи импульса симистору
 //----проверка времен 
 long start_time=0;  
 long time_work=0;
@@ -50,7 +51,8 @@ long process_timer_interval = 10; //интервал присвоения нов
 #define time_interval_triac 1  //интервал для выдачи упраляющих импульсов на симистор
 #define time_interval_temper 100  //интервал для опроса температуры
 #define time_interval_log 99    //интервал логгирования 
-long time_before_start = 0; //интервал присвоения нового числа таймеру
+#define time_interval_block 50  // интервал проверки блокировки
+long time_before_start = 0;     //обнуление время с которого начался режим работы
 
 // назначение кнопок
 #define BUTTON_START 2 //назначение пина кнопки старт
@@ -67,10 +69,10 @@ int out_servo=0; // установка положения сервопривод
 int servoPin = 9;            // порт подключения сервы
 int pulseWidth;              // длительность импульса
 //----------------------------- управление симистором
-int setpoint=100;	// установка мощности
+int setpoint=43;	// уставка
 int modulator=0;	// рабочая переменная
 int er=50;        // ошибка
-		
+int dataPID=0;
 #define TRIAC_ON (PORTC |= (1<<PC0)); // на си включение тиристора, 
 #define TRIAC_OFF (PORTC &= ~(1<<PC0)); //отключение тиристора
 //-------------------------------переменные датчика температуры
@@ -128,7 +130,14 @@ void setup()
   if (block_event != blockNone) {current_state=kBlocking;}// 
 }
 
-
+int computePID(float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
+  float err = setpoint - input;
+  static float integral = 0, prevErr = 0;
+  integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
+  float D = (err - prevErr) / dt;
+  prevErr = err;
+  return constrain(err * kp + integral + D * kd, minOut, maxOut);
+}
 
 //---------------------------функции таймера
 void ProcessTimers(void) // прибавление к таймерам через интервал
@@ -184,8 +193,8 @@ void servoPulse(int servoPin, int myAngle)
   digitalWrite(servoPin, LOW);        // устанавливаем низкий уровень
 }
 
-void brasenham(void){
-    modulator = setpoint + er; 
+void brasenham(int data){
+    modulator = data + er; 
     if (modulator < 50)
       {
         TRIAC_OFF;
@@ -221,6 +230,19 @@ _симистор_не_открывать_; // весь период
     //? как так
     // TODO 
     //* 
+}
+void ResetWork (void)   //функция сброса переменных выходов и таймеров для остановки и блокировки
+{
+  is_work=false;
+  temp_state = kSendRecuest;
+  StopTimer(TRIAC_TIMER);
+  StopTimer(TEMPER_TIMER);
+  StopTimer(LOGGING_TIMER);
+  TRIAC_OFF;
+  servoPulse(servoPin, 135);
+  digitalWrite(RELAY, LOW);    // выключает реле
+  //-analogWrite(PWM_OUT, 0); //откл шим
+  ///1 Serial.println(F("Done"));
 }
 
 //---------------------------//основной цикл
@@ -283,6 +305,8 @@ void loop()
         // Выводим полученное значение температуры в монитор порта
         Serial.println(temperature);
         temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
+       //2 dataPID=computePID (temperature,setpoint,33.5485,164.9514,30.7416,1,0,100);
+        dataPID=computePID (temperature,setpoint,0.89,0.37,0.37,1,0,100);
       }
       break;
     }
@@ -291,6 +315,7 @@ void loop()
     // TODO медианный фильтр 
     pwm=analogRead(6); 
     setpoint=map(pwm, 0, 1023, 0, 100);
+    
     //setpoint=50;
     //опрос кнопки логгирования
     log_on = digitalRead(BUTTON_LOG);
@@ -396,7 +421,8 @@ void loop()
     if (timers[TRIAC_TIMER] > time_interval_triac) //очередной расчет для симистора
       {
         ResetTimer(TRIAC_TIMER);
-        brasenham();
+        //!brasenham(dataPID);
+        brasenham(setpoint);
       }
     //-analogWrite(PWM_OUT, pwm / 4); //вывод на шим
     if (log_on)  { current_state = kDataLog; }//уходим в логгирование
@@ -420,6 +446,8 @@ void loop()
       //file.print(pwm);
       file.write(',');
       file.print(temperature);
+      file.write(',');
+      file.print(dataPID);
       file.println();
      ///1 Serial.println("Log");
       StopTimer(LOGGING_TIMER);
@@ -432,14 +460,8 @@ void loop()
     { // первое вхождение
       //Serial.println(current_state);
     }
-    //TODO вынести в функцию, будет использоваться и в блокировке и в остановке
     if (log_on)  file.close();   // закрываем файл лога
-    StopTimer(TRIAC_TIMER);
-    TRIAC_OFF;
-    //-analogWrite(PWM_OUT, 0); //откл шим
-    servoPulse(servoPin, 135);
-    digitalWrite(RELAY, LOW);    // выключает реле
-   ///1 Serial.println(F("Done"));
+    ResetWork ();   //сбрасываем выходы и таймеры
     current_state = kGetInput; //уходим в опрос входов
     //-------------------------------------------------блокировка
     break;
@@ -448,20 +470,26 @@ void loop()
     { // первое вхождение
       previous_state = current_state;
       Serial.print("BLOCK ");
-      temp_state = kSendRecuest;
-      is_work=false;
-      StopTimer(TEMPER_TIMER);
-      TRIAC_OFF;
-      digitalWrite(RELAY, LOW);    // выключает реле
+      ResetWork (); 
+      
+      //если ведется лог, то сделать запись об ошибке 
+      if (log_on) {
+      file.print(F("e="));
+      file.print(block_event);
+      file.println();
+      file.close(); 
+      }
     }
     switch (block_event)
     {
     case blockCrc:
-      //TODO опрос проблемных мест делать с задержкой , пусть пол секунды
-      Serial.print("CRC is not valid!\n");  //  CRC не корректен //? уйти в полную блокировку или сбросить программу и восстановить если приблема исчезнет.
-      block_event=TempControlData();
-      //TODO если ведется лог, то сделать запись об ошибке 
-      //? закрывать при этом файл или нет 
+      StartTimer(BLOCK_TIMER); // опрос проблемных мест делать с задержкой , пусть пол секунды
+      if (timers[BLOCK_TIMER] > time_interval_block)
+      {
+        Serial.print("CRC is not valid!\n");  //  CRC не корректен //? уйти в полную блокировку или сбросить программу и восстановить если приблема исчезнет.
+        block_event=TempControlData();
+        StopTimer(BLOCK_TIMER);
+      }
       break;
     case blockDs18b20:
       Serial.print("not DS18B20\n");// тип датчика не 18b20
@@ -482,3 +510,4 @@ void loop()
   }
 
 }
+
