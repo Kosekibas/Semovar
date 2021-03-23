@@ -307,6 +307,8 @@ void loop()
         temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
        //2 dataPID=computePID (temperature,setpoint,33.5485,164.9514,30.7416,1,0,100);
         dataPID=computePID (temperature,setpoint,0.89,0.37,0.37,1,0,100);
+        //4.5895/0.0065405/77.24.56 ///317s ~2000s
+        //2.0485/0.0010635/1.024 ///737s  ~5000s
       }
       break;
     }
