@@ -1,3 +1,7 @@
+
+// ! внимание мать
+    //? как так
+    // TODO 
 // TODO проверка разрешающей способности датчика температуры. по умолчанию 12 бит. если уменьшать, то необходимо считывать этот параметр и при необходимости записывать в датчик при каждом включении
 #include <Arduino.h>
 #include "avr/wdt.h" // подключаем watch dog таймер
@@ -10,6 +14,8 @@ enum StateWork //перечисление рабочих состояний
   kGetInput, //получение входных данных
   kStart,    //начало работы
   kMode,     //режим
+  kMainHeat, //главный нагрев
+  kMaintenanceTemp, //поддержание температуры
   kPwm,      //шим
   kDataLog,  //запись данных
   kWait,     //ожидание
@@ -63,16 +69,21 @@ bool log_on = false;   //логгирование вклчено
 //-#define PWM_OUT 5 //назначение пина шим
 int pwm;              // вход переменного резистора
 // реле
-#define RELAY 4   //назначение пина реле
+//----------------------------- Главный нагреватель
+#define MAIN_HEATER 6   //назначение пина реле главного нагревателя
+#define MAIN_HEATER_ON (PORTD |= (1<<PD6)); // на си включение тиристора, 
+#define MAIN_HEATER_OFF (PORTD &= ~(1<<PD6)); //отключение тиристора
+
 //----------------------------- сервопривод
 int out_servo=0; // установка положения сервопривода в градусах
 int servoPin = 9;            // порт подключения сервы
 int pulseWidth;              // длительность импульса
 //----------------------------- управление симистором
-int setpoint=43;	// уставка
+int setpoint_support=80;	// уставка поддержания температуры
 int modulator=0;	// рабочая переменная
 int er=50;        // ошибка
 int dataPID=0;
+#define RELAY 4   //назначение пина реле защиты симистра
 #define TRIAC_ON (PORTC |= (1<<PC0)); // на си включение тиристора, 
 #define TRIAC_OFF (PORTC &= ~(1<<PC0)); //отключение тиристора
 //-------------------------------переменные датчика температуры
@@ -116,10 +127,12 @@ void setup()
   pinMode(BUTTON_LOG, INPUT);
   pinMode(RELAY, OUTPUT);  
   digitalWrite(RELAY, LOW);    // выключает реле
+  pinMode(MAIN_HEATER, OUTPUT);
+  digitalWrite(MAIN_HEATER, LOW);    // выключает реле
   //-pinMode(PWM_OUT, OUTPUT); 
   //-analogWrite(PWM_OUT, 0); //откл шим  
   pinMode(servoPin, OUTPUT);          // пин сервы, как выход
-  pinMode(RELAY, OUTPUT); 
+  //? pinMode(RELAY, OUTPUT); 
   DDRC = (1 << DDC0);// выставляем А0 как цифровой выход
   TRIAC_OFF;
   Serial.begin(9600);
@@ -130,8 +143,8 @@ void setup()
   if (block_event != blockNone) {current_state=kBlocking;}// 
 }
 
-int computePID(float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
-  float err = setpoint - input;
+int computePID(float input, float setpoint_support, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
+  float err = setpoint_support - input;
   static float integral = 0, prevErr = 0;
   integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
   float D = (err - prevErr) / dt;
@@ -226,9 +239,7 @@ _симистор_открыть_; // на весь период
 } else
 _симистор_не_открывать_; // весь период
     */
-    // ! внимание мать
-    //? как так
-    // TODO 
+    
     //* 
 }
 void ResetWork (void)   //функция сброса переменных выходов и таймеров для остановки и блокировки
@@ -305,8 +316,8 @@ void loop()
         // Выводим полученное значение температуры в монитор порта
         Serial.println(temperature);
         temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
-       //2 dataPID=computePID (temperature,setpoint,33.5485,164.9514,30.7416,1,0,100);
-        dataPID=computePID (temperature,setpoint,0.89,0.37,0.37,1,0,100);
+       //2 dataPID=computePID (temperature,setpoint_support,33.5485,164.9514,30.7416,1,0,100);
+        dataPID=computePID (temperature,setpoint_support,0.89,0.37,0.37,1,0,100);
         //4.5895/0.0065405/77.24.56 ///317s ~2000s
         //2.0485/0.0010635/1.024 ///737s  ~5000s
       }
@@ -316,9 +327,9 @@ void loop()
     // опрос переменника для для шим
     // TODO медианный фильтр 
     pwm=analogRead(6); 
-    setpoint=map(pwm, 0, 1023, 0, 100);
+    setpoint_support=map(pwm, 0, 1023, 0, 100);
     
-    //setpoint=50;
+    //setpoint_support=50;
     //опрос кнопки логгирования
     log_on = digitalRead(BUTTON_LOG);
     //опрос кнопки старт
@@ -413,6 +424,30 @@ void loop()
 
     current_state = kPwm; //уходим в шим
     break;
+  //------------------------------------------------первичный нагрев
+  case kMainHeat:
+  // TODO алгоритм: сначала включаем реле, если температура больше уставки, то выключаем реле и уходим в поддержание температуры
+  if (entry)
+    { // первое вхождение
+      previous_state = current_state;
+      if (digitalRead(MAIN_HEATER) == 0)    MAIN_HEATER_ON; /// если нагреватель выключен-включаем
+    }
+  if (temperature>setpoint_support) 
+  {
+    MAIN_HEATER_OFF;// отключаем нагрев
+    current_state = kMode; //уходим в поддержание температуры
+    break;
+  }  
+  else
+  {
+    if (log_on)  { current_state = kDataLog; }//уходим в логгирование
+    else  { current_state = kGetInput; } //уходим в опрос входов
+  }
+  break;
+  //------------------------------------------------поддержание температуры
+  case kMaintenanceTemp:
+
+  break;
   //------------------------------------------------вывод на шим
   case kPwm:
     if (entry)
@@ -424,7 +459,7 @@ void loop()
       {
         ResetTimer(TRIAC_TIMER);
         //!brasenham(dataPID);
-        brasenham(setpoint);
+        brasenham(setpoint_support);
       }
     //-analogWrite(PWM_OUT, pwm / 4); //вывод на шим
     if (log_on)  { current_state = kDataLog; }//уходим в логгирование
@@ -444,7 +479,7 @@ void loop()
       long log_time=(process_timer_2-time_before_start)/1000UL;
       file.print(log_time);
       file.write(',');
-      file.print(setpoint);
+      file.print(setpoint_support);
       //file.print(pwm);
       file.write(',');
       file.print(temperature);
