@@ -4,6 +4,9 @@
     // TODO 
 // TODO проверка разрешающей способности датчика температуры. по умолчанию 12 бит. если уменьшать, то необходимо считывать этот параметр и при необходимости записывать в датчик при каждом включении
 // TODO оставить в датчике температуры только целую часть и уставки пересчитать с учетом коэффициента-долой плавающие точки на 8 битах
+// TODO 1 лог если сначала небл включен то и файл не создается, если потом включить то некуда писать строчик-ошибка
+// TODO 2 разобраться с 85.00 от датчика температуры-баг который может заменить режим
+// TODO 3 управление реле - обращаться на с++ напрямую
 #include <Arduino.h>
 #include "avr/wdt.h" // подключаем watch dog таймер
 #include <OneWire.h>
@@ -14,11 +17,10 @@ enum StateWork //перечисление рабочих состояний
 {
   kSleep,   //сон или ожидание
   kStart,    //начало работы
-  kMode,     //режим
+  //kMode,     //режим   //! пока исключен за ненадобностью
   kMainHeat, //главный нагрев
   kMaintenanceTemp, //поддержание температуры
-  kPwm,      //шим
-  //kDataLog,  //запись данных
+  //kPwm,      //шим //! пока исключен за ненадобностью
   kWait,     //ожидание
   kStop,     //окончание работы
   kBlocking  //блокировка
@@ -34,7 +36,6 @@ enum StateBlock
   blockSdCreate, // не могу создать файл на сд карте
   blockSdOpen,   // не могу открыть файл на sd карте
   blockHeatMax, // перегрев
-  blockHeatMin, // недогрев
   blockNone   // нет блокировки
 };
 StateBlock block_event;
@@ -310,7 +311,6 @@ bool  GetInput(void) // опрос входов     // TODO вынести в о
           if (temp_err ==3)    block_event = blockCrc;   // продолжается 3 итерации-уходим в блокировку
           break;
         }
-        block_event=blockNone;
         temp_err=0;
         // Формируем итоговое значение:
         //    - сперва "склеиваем" значение,
@@ -324,17 +324,19 @@ bool  GetInput(void) // опрос входов     // TODO вынести в о
         dataPID=computePID (temperature,setpoint_support,0.89,0.37,0.37,1,0,100);
         //4.5895/0.0065405/77.24.56 ///317s ~2000s
         //2.0485/0.0010635/1.024 ///737s  ~5000s
+      Serial.println(current_state);
       }
       break;
     }
-    if (block_event!=blockNone) return true; //если по датчику температуры получили блокировку, то дальше не идем
+    
     // опрос переменника для для шим
     // TODO медианный фильтр 
     pwm=analogRead(6); 
-    setpoint_support=map(pwm, 0, 1023, 0, 100);
+    //! это не уставка а задание setpoint_support=map(pwm, 0, 1023, 0, 100);
     //setpoint_support=50;
     log_on = digitalRead(BUTTON_LOG);        //опрос кнопки логгирования
-    but_start= digitalRead(BUTTON_START);    //опрос кнопки старт
+    but_start = digitalRead(BUTTON_START);    //опрос кнопки старт
+    if (block_event ==blockCrc) return true; //если по датчику температуры получили блокировку, то дальше не идем
     return false;// выходим без ошибок
 }
 
@@ -350,20 +352,20 @@ void loop()
   switch (current_state) //<><><><><><><> ------------бегаем по состояниям
   {
   //-----------------------------------------------сон
-    case kSleep:
+  case kSleep:
       if (entry)
       { // первое вхождение
         previous_state = current_state;
-        Serial.print("Sleep");
+        Serial.print("Sleep\n");
       }
       if (but_start) current_state = kStart; // переходим в состояние-запуска работы
-  
+  break;
   //------------------------------------------------начинаем работать, создаем лог файл
   case kStart:
     if (entry)
     { // первое вхождение
       previous_state = current_state;
-      Serial.print("Start");
+      Serial.print("Start\n");
       servoPulse(servoPin, 90);
     }
     
@@ -416,16 +418,7 @@ void loop()
     current_state = kMainHeat;        //уходим в первичный нагрев
     
     break;
-  //------------------------------------------------работа по режиму
-  //! пока исключен за ненадобностью
-  case kMode:                 // пид или ручник
-    if (entry)
-    { // первое вхождение
-      previous_state = current_state;
-     // Serial.println(current_state);
-    }
-    current_state = kPwm; //уходим в шим
-    break;
+
   //------------------------------------------------первичный нагрев
   case kMainHeat:
   // TODO алгоритм: сначала включаем реле, если температура больше уставки, то выключаем реле и уходим в поддержание температуры
@@ -433,19 +426,17 @@ void loop()
     { // первое вхождение
       previous_state = current_state;
       Serial.print("Heat");
-      if (digitalRead(MAIN_HEATER) == 0)    MAIN_HEATER_ON; /// если нагреватель выключен-включаем
+      if (digitalRead(MAIN_HEATER) == 0)    MAIN_HEATER_ON; /// если нагреватель выключен-включаем //? нужна ли проверка?
     }
   if (temperature>setpoint_support) //если температура выше уставки
   {
     MAIN_HEATER_OFF;// отключаем нагрев
     current_state = kMaintenanceTemp; //уходим в поддержание температуры
     break;
-  }  
-  else
-  {
-    if (log_on)   DataLog();    //пишем лог
-    if (!but_start)  current_state = kStop; //уходим в остановку
   }
+   // TODO если во время нагрева прирост температуры отрицательный , то блокировка по неисправности тэна  
+  if (log_on)   DataLog();    //пишем лог
+  if (but_start== false)  current_state = kStop; //уходим в остановку
   break;
   //------------------------------------------------поддержание температуры
   case kMaintenanceTemp:
@@ -464,12 +455,13 @@ void loop()
     //!brasenham(dataPID);        // поддержание температуры через пид
     brasenham(setpoint_support); // вывод на симистор уставки с крутилки
   }
-  if (temperature>95) block_event=blockHeatMax;   // перегрев
-  if (temperature<65) block_event=blockHeatMin;   // недогрев
+  
+  if (temperature>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
+  if (temperature<65) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
   //-analogWrite(PWM_OUT, pwm / 4);               //вывод на шим
   if (log_on)  DataLog();                         //уходим в логгирование
   if (block_event!=blockNone) current_state=kBlocking;
-  if (!but_start) current_state=kStop;
+  if (but_start == false) current_state=kStop;
   break;
 
   case kStop:
@@ -519,9 +511,6 @@ void loop()
       break;
     case   blockHeatMax: // перегрев
       Serial.print("blockHeatMax\n");    
-      break;
-    case blockHeatMin: // недогрев
-      Serial.print("blockHeatMin\n");    
       break;
     case blockNone:
       current_state = kSleep; //! тут будет не все так просто мать твою! нужно выходить туда откуда пиршли) или нихуя! Скорее нужно начать отрабатывать заново-новый лог, новый нагрев и выход на режим
