@@ -85,6 +85,7 @@ int servoPin = 9;            // порт подключения сервы
 int pulseWidth;              // длительность импульса
 //----------------------------- управление симистором
 int setpoint_support=80;	// уставка поддержания температуры
+int setpoint_heat=78; // уставка температуры основного нагрева 
 int modulator=0;	// рабочая переменная
 int er=50;        // ошибка
 int dataPID=0;
@@ -94,15 +95,19 @@ int dataPID=0;
 #define TRIAC_ON (PORTC |= (1<<PC0)); // на си включение тиристора, 
 #define TRIAC_OFF (PORTC &= ~(1<<PC0)); //отключение тиристора
 //-------------------------------переменные датчика температуры
-OneWire ds(8);         // Создаем объект OneWire для шины 1-Wire, с помощью которого будет осуществляться работа с датчиком
+//TODO переименовать ds в датчик температуры воды
+OneWire sensor_water(8);         // Создаем объект OneWire для шины 1-Wire, с помощью которого будет осуществляться работа с датчиком
+OneWire sensor_vapor(7);         // датчик пара
 enum TempCommunication //состояния общения с датчиком
 {
   kSendRecuest, //передать запрос
   kGetAnsver    //получить ответ
 };
 TempCommunication temp_state; //переменаая состояния датчика температуры
-float temperature;            // переменная хранящая температуру
-byte temp_err = 0;           //  счетчик количества ошибок в температуре
+float temperature_water;            //  температура воды
+float temperature_vapor;            // температура пара
+byte  temperature_error_vapor = 0;           //  счетчик количества ошибок в температуре
+byte  temperature_error_water = 0;           //
 //------------------------------- переменные SD карты
 #define FILE_BASE_NAME "Data"           // общее название логов
 const uint8_t chipSelect = SS;          // пин выбора чипа SD.  !!!!!Отключить все остальное с шины SPI!!!!!.
@@ -110,7 +115,7 @@ SdFat sd;                               // создаем объект SD кар
 SdFile file;                            // Создаем объект лога.
 #define error(msg) sd.errorHalt(F(msg)) //Сообщения об ошибках, хранящиеся во флэш-памяти.
 
-StateBlock TempControlData (void) 
+StateBlock TempControlData (OneWire& ds) 
 {
   byte temp_code[8]; //массив информации датчика температуры
   ds.reset();
@@ -122,7 +127,34 @@ StateBlock TempControlData (void)
   if ( temp_code[0]=!0x28)  return  blockDs18b20; 
   return blockNone;
 }
+void TempSendRecuest (OneWire& ds)
+{
+    ds.reset();               // Начинаем взаимодействие со сброса всех предыдущих команд и параметров
+    ds.write(0xCC);           // обращение ко всем устройствам на шине
+    ds.write(0x44);           // Даем датчику DS18b20 команду измерить температуру. Само значение температуры мы еще не получаем - датчик его положит во внутреннюю память
+}
 
+byte  TempGetAnsver (OneWire& ds, float &temperature, byte error)
+{
+  byte data[9];       // Место для значения температуры
+  ds.reset();
+  ds.write(0xCC);
+  ds.write(0xBE);      // Просим передать нам значение регистров со значением температуры
+  for ( byte i = 0; i < 9; i++) {           // нам нужно 9 байтов
+    data[i] = ds.read();
+  }
+  if ( OneWire::crc8( data, 8) != data[8] || data[7]==0)  // контроль CRC и если примем нули
+  {
+    error +=1; 
+    return error;
+  }
+  error=0;
+  // Формируем итоговое значение:
+  //    - сперва "склеиваем" значение,
+  //    - затем умножаем его на коэффициент, соответсвующий разрешающей способности (для 12 бит по умолчанию - это 0,0625)
+  temperature = ((data[1] << 8) | data[0]) * 0.0625;
+  return error;
+}
 void setup()
 {
   
@@ -146,12 +178,13 @@ void setup()
   current_state = kSleep; // первое состояние- сон
   temp_state = kSendRecuest;
   //TODO бумкнуть задержку
-  block_event= TempControlData();// проверка подключенного датчика температуры
+  block_event= TempControlData(sensor_water);// проверка подключенного датчика температуры воды
+  block_event= TempControlData(sensor_vapor);// проверка подключенного датчика температуры пара
   if (block_event != blockNone) {current_state=kBlocking;}// 
 }
 
-int computePID(float input, float setpoint_support, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
-  float err = setpoint_support - input;
+int computePID(float input, float sp_support, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
+  float err = sp_support - input;
   static float integral = 0, prevErr = 0;
   integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
   float D = (err - prevErr) / dt;
@@ -200,8 +233,10 @@ void ResetTimer(byte Timer) // сбросить таймер
 void writeHeader()
 { //записывем заголовок файла
   file.print(F("second"));
-  file.print(F(",input"));
-  file.print(F(",output"));
+  file.print(F(",water"));
+  file.print(F(",heater"));
+  file.print(F(",vapor"));
+  file.print(F(",cooler"));
   file.println();
 }
 
@@ -273,13 +308,15 @@ void DataLog (void) //TODO передавать все переменные
     long log_time=(process_timer_2-time_before_start)/1000UL;
     file.print(log_time);
     file.write(',');
-    file.print(setpoint_support);
-    //file.print(pwm);
-    file.write(',');
-    file.print(temperature);
+    file.print(temperature_water);
     file.write(',');
     file.print(dataPID);
+    file.write(',');
+    file.print(temperature_vapor);
+    file.write(',');
+    file.print(pwm);
     file.println();
+
     StopTimer(LOGGING_TIMER);
   }
 }
@@ -287,47 +324,32 @@ void DataLog (void) //TODO передавать все переменные
 //возвращает 0 при успешном выполнени, 1 при ошибке
 bool  GetInput(void)      
 {
-  byte data[9];       // Место для значения температуры
   switch (temp_state) // работаем с датчиком температуры
   {
   case kSendRecuest:          // отправляем запрос подготовить значение температуры
-    ds.reset();               // Начинаем взаимодействие со сброса всех предыдущих команд и параметров
-    ds.write(0xCC);           // обращение ко всем устройствам на шине
-    ds.write(0x44);           // Даем датчику DS18b20 команду измерить температуру. Само значение температуры мы еще не получаем - датчик его положит во внутреннюю память
+    TempSendRecuest (sensor_vapor);
+    TempSendRecuest (sensor_water);
     temp_state = kGetAnsver;  // переходим в состояние получить ответ
+    
     StartTimer(TEMPER_TIMER); //запускаем таймер
     break;
   case kGetAnsver:                                   // получаем значение температуры
     if (timers[TEMPER_TIMER] > time_interval_temper) //если прошло время на подготовку ответа
     {
       StopTimer(TEMPER_TIMER);
-      ds.reset();
-      ds.write(0xCC);
-      ds.write(0xBE);      // Просим передать нам значение регистров со значением температуры
-      for ( byte i = 0; i < 9; i++) {           // нам нужно 9 байтов
-        data[i] = ds.read();
-      }
-      if ( OneWire::crc8( data, 8) != data[8] || data[7]==0)  // контроль CRC и если примем нули
-      {
-        temp_err +=1; 
-        temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
-        if (temp_err ==3)    block_event = blockCrc;   // продолжается 3 итерации-уходим в блокировку
-        break;
-      }
-      temp_err=0;
-      // Формируем итоговое значение:
-      //    - сперва "склеиваем" значение,
-      //    - затем умножаем его на коэффициент, соответсвующий разрешающей способности (для 12 бит по умолчанию - это 0,0625)
-      temperature = ((data[1] << 8) | data[0]) * 0.0625;
-      // Выводим полученное значение температуры в монитор порта
-      Serial.println(temperature);
+      if (TempGetAnsver(sensor_vapor, temperature_vapor,temperature_error_vapor) == 3)  block_event =blockCrc; //если ошибка возвращается 3 раза подряд, то в блок
+      if (TempGetAnsver(sensor_water, temperature_water,temperature_error_water) == 3)  block_event =blockCrc; //если ошибка возвращается 3 раза подряд, то в блок
       temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
+      // Выводим полученное значение температуры в монитор порта
+      Serial.println(temperature_water);
+      Serial.println(temperature_vapor);
+
+      
       //---------------расчет пид регулятора
-      //2 dataPID=computePID (temperature,setpoint_support,33.5485,164.9514,30.7416,1,0,100);
-      dataPID=computePID (temperature,setpoint_support,0.89,0.37,0.37,1,0,100);
-      //4.5895/0.0065405/77.24.56 ///317s ~2000s
-      //2.0485/0.0010635/1.024 ///737s  ~5000s
-    Serial.println(current_state);
+      //dataPID=computePID (temperature_water,setpoint_support,0.89,0.37,0.37,1,0,100);
+      //dataPID=computePID (temperature_water,setpoint_support,2.595,0.0002036,1.297,1,0,100); // для маленького тэна на панасонике
+      //!!!!!!!!!!!!!!!!!!!!dataPID=computePID (temperature_water,setpoint_support,6.656,0.001201,943.8,1,0,100); // для маленького тэна на панасонике 2
+      dataPID=computePID (temperature_water,setpoint_support,35,0.1,1,1,0,100); // для маленького тэна на панасонике вручную правлю D/i/p  !!!Оставляем
     }
     break;
   }
@@ -335,8 +357,7 @@ bool  GetInput(void)
   // опрос переменника для для шим
   // TODO медианный фильтр 
   pwm=analogRead(6); 
-  //! это не уставка а задание setpoint_support=map(pwm, 0, 1023, 0, 100);
-  //setpoint_support=50;
+  //!setpoint_support=map(pwm, 0, 1023, 0, 100); //!при пид закоментировать 
   log_on = digitalRead(BUTTON_LOG);        //опрос кнопки логгирования // TODO
   but_start = digitalRead(BUTTON_START);    //опрос кнопки старт // TODO
   //? если опрос температуры выкинуть вниз то условие выхода по ошибке можно упростить убрав строку ниже
@@ -441,7 +462,7 @@ void loop()
       Serial.print("Heat");
       if (digitalRead(MAIN_HEATER) == 0)    MAIN_HEATER_ON; /// если нагреватель выключен-включаем //? нужна ли проверка?
     }
-  if (temperature>setpoint_support) //если температура выше уставки
+  if (temperature_water>setpoint_heat) //если температура выше уставки
   {
     MAIN_HEATER_OFF;// отключаем нагрев
     current_state = kMaintenanceTemp; //уходим в поддержание температуры
@@ -469,12 +490,12 @@ void loop()
   if (timers[TRIAC_TIMER] > time_interval_triac) //очередной расчет для симистора
   {
     ResetTimer(TRIAC_TIMER);
-    //!brasenham(dataPID);        // поддержание температуры через пид
-    brasenham(setpoint_support); // вывод на симистор уставки с крутилки
+    brasenham(dataPID);        // поддержание температуры через пид
+    //!brasenham(setpoint_support); // вывод на симистор уставки с крутилки
   }
   
-  if (temperature>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
-  if (temperature<65) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
+  if (temperature_water>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
+  if (temperature_water<65) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
   //-analogWrite(PWM_OUT, pwm / 4);               //вывод на шим
   if (log_on)  DataLog();                         //уходим в логгирование
   if (block_event!=blockNone) current_state=kBlocking;
@@ -515,7 +536,8 @@ void loop()
       if (timers[BLOCK_TIMER] > time_interval_block)
       {
         Serial.print("CRC is not valid!\n");  //  CRC не корректен //? уйти в полную блокировку или сбросить программу и восстановить если приблема исчезнет.
-        block_event=TempControlData(); // повторить проверку контрольной суммы
+        block_event=TempControlData(sensor_water); // повторить проверку контрольной суммы
+        block_event=TempControlData(sensor_vapor); // повторить проверку контрольной суммы
         StopTimer(BLOCK_TIMER);
       }
       break;
