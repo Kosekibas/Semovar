@@ -84,8 +84,8 @@ int out_servo=0; // установка положения сервопривод
 int servoPin = 9;            // порт подключения сервы
 int pulseWidth;              // длительность импульса
 //----------------------------- управление симистором
-int setpoint_support=80;	// уставка поддержания температуры
-int setpoint_heat=78; // уставка температуры основного нагрева 
+int setpoint_support=100;	// уставка поддержания температуры
+int setpoint_heat=98; // уставка температуры основного нагрева 
 int setpoint_cooler=100; //уставка охладителя
 int modulator=0;	// рабочая переменная
 int er=50;        // ошибка
@@ -96,7 +96,6 @@ int dataPID=0;
 #define TRIAC_ON (PORTC |= (1<<PC0)); // на си включение тиристора, 
 #define TRIAC_OFF (PORTC &= ~(1<<PC0)); //отключение тиристора
 //-------------------------------переменные датчика температуры
-//TODO переименовать ds в датчик температуры воды
 OneWire sensor_water(8);         // Создаем объект OneWire для шины 1-Wire, с помощью которого будет осуществляться работа с датчиком
 OneWire sensor_vapor(7);         // датчик пара
 enum TempCommunication //состояния общения с датчиком
@@ -438,8 +437,7 @@ void loop()
         previous_state = current_state;
         Serial.print("Sleep\n");
       }
-      //! проверка работы кулера по шим
-       if (but_start) current_state = kStart; // переходим в состояние-запуска работы
+      if (but_start) current_state = kStart; // переходим в состояние-запуска работы
   break;
   //------------------------------------------------начинаем работать, создаем лог файл
   case kStart:
@@ -499,8 +497,8 @@ void loop()
     //!brasenham(setpoint_support); // вывод на симистор уставки с крутилки
   }
   
-  if (temperature_water>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
-  if (temperature_water<65) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
+  if (temperature_water>110) block_event=blockHeatMax;   // перегрев уходим в блокировку
+  if (temperature_water<90) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
   //-analogWrite(PWM_OUT, pwm / 4);               //вывод на шим
   if (log_on)  DataLog();                         //уходим в логгирование
   if (block_event!=blockNone) current_state=kBlocking;
