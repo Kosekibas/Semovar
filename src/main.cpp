@@ -157,24 +157,31 @@ byte  TempGetAnsver (OneWire& ds, float &temperature, byte error)
 }
 void setup()
 {
-  
+  noInterrupts();//отключить прерывания
   //си настройка АЦП
+  // |= -записать единицу, не стирая другие
+  // &=~ -записать ноль, в бит n
   ADCSRA |= (1 << ADPS2);                     //Биту ADPS2 присваиваем единицу - коэффициент деления 16
   ADCSRA &= ~ ((1 << ADPS1) | (1 << ADPS0));  //Битам ADPS1 и ADPS0 присваиваем нули
-//
+  // си настройка таймера 2 на шим с фазовой коррекцией вывод на порт B (нога 3 ардуино) без предделител-частота 31.4 кГц
+  // TCCR2B = 0b00000001;  // 
+  // TCCR2A = 0b00100001;  // 
+  TCCR2B |= (1<<CS20);
+  TCCR2A |= ((1<<COM2B1) | (1<<WGM20));
+  OCR2B= 128; //шим 50% в регистр сравнения// TODO регистр сравнения задефайнить на шим
+  //  analogWrite(PWM_OUT, 0); //откл шим  
+  DDRC |= (1 << DDC0);// выставляем А0 как цифровой выход
+  TRIAC_OFF;
+  interrupts();//включить прерывания
+
   pinMode(BUTTON_START, INPUT);
   pinMode(BUTTON_LOG, INPUT);
   pinMode(RELAY, OUTPUT);  
   digitalWrite(RELAY, LOW);    // выключает реле
   pinMode(MAIN_HEATER, OUTPUT);
   digitalWrite(MAIN_HEATER, LOW);    // выключает реле
-  TCCR2B = 0b00000001;  // Пины D3 и D11 - 31.4 кГц
-  TCCR2A = 0b00000001;  // phase correct
-  analogWrite(PWM_OUT, 0); //откл шим  
   pinMode(servoPin, OUTPUT);          // пин сервы, как выход
-  //? pinMode(RELAY, OUTPUT); 
-  DDRC = (1 << DDC0);// выставляем А0 как цифровой выход
-  TRIAC_OFF;
+
   Serial.begin(9600);
   current_state = kSleep; // первое состояние- сон
   temp_state = kSendRecuest;
@@ -344,7 +351,8 @@ bool  GetInput(void)
       // Выводим полученное значение температуры в монитор порта
       Serial.println(temperature_water);
       Serial.println(temperature_vapor);
-      analogWrite(PWM_OUT, setpoint_cooler);               //!!!вывод на шим
+     // analogWrite(PWM_OUT, setpoint_cooler);               //!!!вывод на шим
+      OCR2B =setpoint_cooler;
 
       
       //---------------расчет пид регулятора
