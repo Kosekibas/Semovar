@@ -19,6 +19,7 @@
 
 enum StateWork //перечисление рабочих состояний
 {
+  kNull, //состояние до входа в автомат
   kSleep,   //сон или ожидание
   kStart,    //начало работы
   //kMode,     //режим   //! пока исключен за ненадобностью
@@ -69,19 +70,20 @@ long process_timer_interval = 10; //интервал присвоения нов
 #define time_interval_temper 100  //интервал для опроса температуры
 #define time_interval_log 99    //интервал логгирования 
 #define time_interval_block 50  // интервал проверки блокировки
-#define time_interval_fan_control 3 // время в течении которого вентилятор должн ответить тахометром ~2секунды
+#define time_interval_fan_control 200 // время в течении которого вентилятор должн ответить тахометром ~2секунды
 long time_before_start = 0;     //обнуление время с которого начался режим работы
 
 // назначение кнопок
-#define BUTTON_START 2 //назначение пина кнопки старт //! (PIND&(1 << PD2) ==1 если нажата
-#define BUTTON_LOG 5   //назначение пина кнопки логгирования //! (PIND&(1 << PD3) ==1 если нажата!! проверить возможно pd5
+#define BUTTON_START 2 //назначение пина кнопки старт //! (PIND&(1 << PD2)) ==1 если нажата
+#define BUTTON_LOG 5   //назначение пина кнопки логгирования //! (PIND&(1 << PD3)) ==1 если нажата!! проверить возможно pd5
 bool is_work = false;  // перешли в режим работы
 bool log_on = false;   //логгирование вклчено
 bool but_start=false;       // кнопка старт нажата
 // ШИМ
 //#define PWM_OUT 3 //назначение пина шим 
 #define PWM_OUT OCR2B // регистр шим то выдается на ногу
-#define PWM_IS_RUN (PINC&(1<<PC3)==1) //! Если тахометр выдает сигнал
+#define PWM_IS_STOP (PINC &(1<<PC3))==0 // Если тахометр  выдает сигнал
+
 int pwm=0;              // вход переменного резистора
 //----------------------------- Главный нагреватель
 //#define MAIN_HEATER 6   //назначение пина реле главного нагревателя
@@ -128,6 +130,45 @@ SdFat sd;                               // создаем объект SD кар
 SdFile file;                            // Создаем объект лога.
 #define error(msg) sd.errorHalt(F(msg)) //Сообщения об ошибках, хранящиеся во флэш-памяти.
 
+//---------------------------функции таймера
+void ProcessTimers(void) // прибавление к таймерам через интервал
+{
+  process_timer_2 = millis();
+    if ((process_timer_2 - process_timer_1) >= process_timer_interval)
+  {
+    process_timer_1 = process_timer_2;
+    for (byte i = 0; i < MAX_TIMERS; i++)
+      if (timers_states[i] == TIMER_RUNNING)
+        timers[i]++;
+    wdt_reset(); // сброс сторожевого таймера
+  }
+}
+void StartTimer(byte Timer) //запуск таймера
+{
+  if (timers_states[Timer] == TIMER_STOPPED)
+  {
+    timers_states[Timer] = TIMER_RUNNING;
+    timers[Timer] = 0;
+  }
+}
+void StopTimer(byte Timer) //Стоп таймера
+{
+  if (timers_states[Timer] == TIMER_RUNNING)
+  {
+    timers_states[Timer] = TIMER_STOPPED;
+    timers[Timer] = 0;
+  }
+}
+unsigned int GetTimer(byte Timer) // получить время таймера
+{
+  return timers[Timer];
+}
+void ResetTimer(byte Timer) // сбросить таймер
+{
+  if (timers_states[Timer] == TIMER_RUNNING)
+    timers[Timer] = 0;
+}
+
 StateBlock TempControlData (OneWire& ds) 
 {
   byte temp_code[8]; //массив информации датчика температуры
@@ -170,15 +211,27 @@ byte  TempGetAnsver (OneWire& ds, float &temperature, byte error)
 }
 StateBlock FanControl()
 {
+  //TODO срабатывает при малейшем импульсе. а хотелось бы при определенных оборотах
 // запускаем кулер на максимум, ждем пока придет ответ в течении времени, если ответа нет, то ошибка по кулеру
-  PWM_OUT=0xFF; //на максимум
-  StartTimer(FAN_CONTROL_TIMER);
-  while ( PWM_IS_RUN )
-  {
-   if(timers[FAN_CONTROL_TIMER] > time_interval_fan_control)   return blockFan;
-  }
-  PWM_OUT=0x00; //отключает шим
-  return blockNone; 
+  if (PWM_IS_STOP==0) return blockFan;
+  else  {
+    PWM_OUT=0xFF; //на максимум
+    delay(200);
+    StartTimer(FAN_CONTROL_TIMER);
+    while (PWM_IS_STOP)
+    {
+      LED_RUN_ON;
+      if(timers[FAN_CONTROL_TIMER] > time_interval_fan_control)   
+      {
+        StopTimer(FAN_CONTROL_TIMER);
+        return blockFan;
+      }
+    }
+    StopTimer(FAN_CONTROL_TIMER);
+    PWM_OUT=0x00; //отключает шим
+    LED_RUN_OFF;
+    return blockNone; 
+    }
 }
 void setup()
 {
@@ -201,7 +254,7 @@ void setup()
   // выставляем А0,A1,A2 как цифровой выход
   DDRC |= (1 << DDC0) | (1 << DDC1)| (1 << DDC2);
   TRIAC_OFF; // отключить симистр
-  LED_RUN_ON;
+  LED_RUN_OFF;
   LED_BLOCK_OFF;
   interrupts();//включить прерывания
   DDRC &=~(1 << DDC3); //A3 на вход
@@ -211,13 +264,13 @@ void setup()
   pinMode(BUTTON_LOG, INPUT);
   pinMode(servoPin, OUTPUT);          // пин сервы, как выход
   
-
+  previous_state =kNull;
   current_state = kSleep; // первое состояние- сон
   temp_state = kSendRecuest;
-  //TODO бумкнуть задержку
+  //TODO некрасиво
   block_event=FanControl(); // проверка кулера
-  block_event= TempControlData(sensor_water);// проверка подключенного датчика температуры воды
-  block_event= TempControlData(sensor_vapor);// проверка подключенного датчика температуры пара
+  if (block_event == blockNone) block_event= TempControlData(sensor_water);// проверка подключенного датчика температуры воды
+  if (block_event == blockNone) block_event= TempControlData(sensor_vapor);// проверка подключенного датчика температуры пара
   if (block_event != blockNone) {current_state=kBlocking;}// 
 }
 
@@ -230,44 +283,7 @@ int computePID(float input, float sp_support, float kp, float ki, float kd, floa
   return constrain(err * kp + integral + D * kd, minOut, maxOut);
 }
 
-//---------------------------функции таймера
-void ProcessTimers(void) // прибавление к таймерам через интервал
-{
-  process_timer_2 = millis();
-    if ((process_timer_2 - process_timer_1) >= process_timer_interval)
-  {
-    process_timer_1 = process_timer_2;
-    for (byte i = 0; i < MAX_TIMERS; i++)
-      if (timers_states[i] == TIMER_RUNNING)
-        timers[i]++;
-    wdt_reset(); // сброс сторожевого таймера
-  }
-}
-void StartTimer(byte Timer) //запуск таймера
-{
-  if (timers_states[Timer] == TIMER_STOPPED)
-  {
-    timers_states[Timer] = TIMER_RUNNING;
-    timers[Timer] = 0;
-  }
-}
-void StopTimer(byte Timer) //Стоп таймера
-{
-  if (timers_states[Timer] == TIMER_RUNNING)
-  {
-    timers_states[Timer] = TIMER_STOPPED;
-    timers[Timer] = 0;
-  }
-}
-unsigned int GetTimer(byte Timer) // получить время таймера
-{
-  return timers[Timer];
-}
-void ResetTimer(byte Timer) // сбросить таймер
-{
-  if (timers_states[Timer] == TIMER_RUNNING)
-    timers[Timer] = 0;
-}
+
 void writeHeader()
 { //записывем заголовок файла
   file.print(F("second"));
@@ -362,7 +378,7 @@ bool  GetInput(void)
       // Выводим полученное значение температуры в монитор порта
       //Serial.println(temperature_water);
       //Serial.println(temperature_vapor);
-      Serial.println(pwm);
+      Serial.println(current_state);
       OCR2B = setpoint_cooler; //!!!вывод на шим
       //---------------расчет пид регулятора
       //dataPID=computePID (temperature_water,setpoint_support,0.89,0.37,0.37,1,0,100);
