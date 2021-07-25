@@ -25,6 +25,9 @@ enum StateWork //перечисление рабочих состояний
   //kMode,     //режим   //! пока исключен за ненадобностью
   kMainHeat, //главный нагрев
   kMaintenanceTemp, //поддержание температуры
+  kHead,
+  kBody,
+  kFeet,
   //kPwm,      //шим //! пока исключен за ненадобностью
   kWait,     //ожидание
   kStop,     //окончание работы
@@ -95,8 +98,8 @@ int out_servo=0; // установка положения сервопривод
 int servoPin = 9;            // порт подключения сервы
 int pulseWidth;              // длительность импульса
 //----------------------------- управление симистором
-int setpoint_support=100;	// уставка поддержания температуры
-int setpoint_heat=98; // уставка температуры основного нагрева 
+int setpoint_support=94;	// уставка поддержания температуры 88
+int setpoint_heat=77; // уставка температуры основного нагрева 85/90
 int setpoint_cooler=0x30; //уставка охладителя
 int modulator=0;	// рабочая переменная
 int er=50;        // ошибка
@@ -268,7 +271,7 @@ void setup()
   current_state = kSleep; // первое состояние- сон
   temp_state = kSendRecuest;
   //TODO некрасиво
-  block_event=FanControl(); // проверка кулера
+  //!!block_event=FanControl(); // проверка кулера
   if (block_event == blockNone) block_event= TempControlData(sensor_water);// проверка подключенного датчика температуры воды
   if (block_event == blockNone) block_event= TempControlData(sensor_vapor);// проверка подключенного датчика температуры пара
   if (block_event != blockNone) {current_state=kBlocking;}// 
@@ -286,11 +289,14 @@ int computePID(float input, float sp_support, float kp, float ki, float kd, floa
 
 void writeHeader()
 { //записывем заголовок файла
-  file.print(F("second"));
-  file.print(F(",water"));
-  file.print(F(",heater"));
-  file.print(F(",vapor"));
-  file.print(F(",cooler"));
+  file.print(F("second")); //время
+  file.print(F(",water")); //температура воды
+  file.print(F(",heater"));//мощность нагревателя , относительная
+  file.print(F(",vapor"));//температура пара
+  file.print(F(",cooler"));//мощность вентилятора , относительная
+  file.print(F(",state"));//текущее состояние
+
+  
   file.println();
 }
 
@@ -351,6 +357,8 @@ void DataLog (void) //TODO передавать все переменные
     file.print(temperature_vapor);
     file.write(',');
     file.print(pwm);
+    file.write(',');
+    file.print(current_state);
     file.println();
 
     StopTimer(LOGGING_TIMER); // TODO перенести вперед
@@ -371,20 +379,25 @@ bool  GetInput(void)
   case kGetAnsver:                                   // получаем значение температуры
     if (timers[TEMPER_TIMER] > time_interval_temper) //если прошло время на подготовку ответа
     {
-      StopTimer(TEMPER_TIMER);
-      if (TempGetAnsver(sensor_vapor, temperature_vapor,temperature_error_vapor) == 3)  block_event =blockCrc; //если ошибка возвращается 3 раза подряд, то в блок
-      if (TempGetAnsver(sensor_water, temperature_water,temperature_error_water) == 3)  block_event =blockCrc; //если ошибка возвращается 3 раза подряд, то в блок
+      StopTimer(TEMPER_TIMER);//!проблема первый неисправный второй исправный, снимает неисправность
+      if (TempGetAnsver(sensor_vapor, temperature_vapor,temperature_error_vapor) == 3)  
+        {
+          block_event =blockCrc; //если ошибка возвращается 3 раза подряд, то в блок
+          break;
+        }
+      if (TempGetAnsver(sensor_water, temperature_water,temperature_error_water) == 3)  {block_event =blockCrc; break;} //если ошибка возвращается 3 раза подряд, то в блок
       temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
       // Выводим полученное значение температуры в монитор порта
-      //Serial.println(temperature_water);
-      //Serial.println(temperature_vapor);
-      Serial.println(current_state);
-      OCR2B = setpoint_cooler; //!!!вывод на шим
+      Serial.println(temperature_water);
+      Serial.println(temperature_vapor);
+      //Serial.println(current_state);
+      
       //---------------расчет пид регулятора
       //dataPID=computePID (temperature_water,setpoint_support,0.89,0.37,0.37,1,0,100);
       //dataPID=computePID (temperature_water,setpoint_support,2.595,0.0002036,1.297,1,0,100); // для маленького тэна на панасонике
       //!!!!!!!!!!!!!!!!!!!!dataPID=computePID (temperature_water,setpoint_support,6.656,0.001201,943.8,1,0,100); // для маленького тэна на панасонике 2
       dataPID=computePID (temperature_water,setpoint_support,35,0.1,1,1,0,100); // для маленького тэна на панасонике вручную правлю D/i/p  !!!Оставляем
+      OCR2B = setpoint_cooler; //!!!вывод на шим
     }
     break;
   }
@@ -510,12 +523,16 @@ void loop()
   if (log_on)  
   {
    //! if (file) DataLog();    //пишем лог ! проверка по константе создан ли файл
-  
+    DataLog(); 
   } 
   if (but_start== false)  current_state = kStop; //уходим в остановку
   break;
   //------------------------------------------------поддержание температуры
   case kMaintenanceTemp:
+  //   Через каждые 2-3 минуты наблюдайте и записывайте показания термометра. Цифры постепенно уменьшаются.
+// Когда последние три записи этих показаний совпадут, считаем, что стабилизация завершена и температура достигла минимума Tmin.
+// Оставьте колонну поработать саму на себя ещё на 5 контрольных минут, для окончательного завершения еще идущего в колонне, и уже не контролируемого с помощью термометра процесса стабилизации.
+
   // TODO алгоритм: либо держим температуру по пид либо крутилкой вручную
    if (entry)
     { // первое вхождение
@@ -527,17 +544,32 @@ void loop()
   if (timers[TRIAC_TIMER] > time_interval_triac) //очередной расчет для симистора
   {
     ResetTimer(TRIAC_TIMER);
-    brasenham(dataPID);        // поддержание температуры через пид
+   // brasenham(dataPID);        // поддержание температуры через пид
+    brasenham(100);       //TODO временно исключен пид малого нагревателя
     //!brasenham(setpoint_support); // вывод на симистор уставки с крутилки
   }
   
-  if (temperature_water>110) block_event=blockHeatMax;   // перегрев уходим в блокировку
-  else if (temperature_water<90) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
+  if (temperature_water>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
+  //if (temperature_water>85) current_state=kStop;   // TODO временная остановка для снятия харакеристики сэмовара
+  else if (temperature_water<75) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
   if (log_on)  DataLog();                         //уходим в логгирование
   if (block_event!=blockNone) current_state=kBlocking;
   if (but_start == false) current_state=kStop;
   break;
+  //------------------------------------------------отбор голов
+  case kHead:
+  //   Через каждые 2-3 минуты наблюдайте и записывайте показания термометра.
+  // Сначала происходит быстрый рост температуры, а затем темп роста замедлится.
+  // Медленный отбор головных фракций (особенно при первом опыте работы на колонне) обязателен! Позже, набравшись опыта, Вы будете устанавливать свой темп отбора.
+  // Когда последние три записи этих показаний совпадут, считаем, что ректификационный процесс в колонне вышел на спиртовую «полку»!
+  //------------------------------------------------отбор тела
+  case kBody:
+  //контроль по температуре нагрева жидкостилибо превышение уставки либо по приращению
 
+  //------------------------------------------------отбор остатков
+  case kFeet:
+  // Не уменьшая отбор, соберите «остаток» до 85ºC (стекло флегмы запотеет)
+  //------------------------------------------------стоп
   case kStop:
     if (entry)
     { // первое вхождение
