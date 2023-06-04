@@ -17,6 +17,12 @@
 #include <SPI.h>
 #include "SdFat.h"
 
+// !Включено
+#define USE_MICRO_WIRE
+#include <GyverOLED.h>
+
+GyverOLED<SSD1306_128x64, OLED_NO_BUFFER> oled;
+
 enum StateWork //перечисление рабочих состояний
 {
   kNull, //состояние до входа в автомат
@@ -88,6 +94,7 @@ bool but_start=false;       // кнопка старт нажата
 #define PWM_IS_STOP (PINC &(1<<PC3))==0 // Если тахометр  выдает сигнал
 
 int pwm=0;              // вход переменного резистора
+int spirt_resistance=0;              // вход сопротивления спирта
 //----------------------------- Главный нагреватель
 //#define MAIN_HEATER 6   //назначение пина реле главного нагревателя
 #define MAIN_HEATER_ON (PORTD |= (1<<PD6)) // на си включение реле нагрева, 
@@ -116,6 +123,7 @@ int dataPID=0;
 //-------------------------------переменные датчика температуры
 OneWire sensor_water(8);         // Создаем объект OneWire для шины 1-Wire, с помощью которого будет осуществляться работа с датчиком
 OneWire sensor_vapor(7);         // датчик пара
+OneWire sensor_flegma(A3);         // датчик флегмы
 enum TempCommunication //состояния общения с датчиком
 {
   kSendRecuest, //передать запрос
@@ -124,8 +132,10 @@ enum TempCommunication //состояния общения с датчиком
 TempCommunication temp_state; //переменаая состояния датчика температуры
 float temperature_water;            //  температура воды
 float temperature_vapor;            // температура пара
+float temperature_flegma;            // температура пара
 byte  temperature_error_vapor = 0;           //  счетчик количества ошибок в температуре
 byte  temperature_error_water = 0;           //
+byte  temperature_error_flegma = 0;           //  счетчик количества ошибок в температуре
 //------------------------------- переменные SD карты
 #define FILE_BASE_NAME "Data"           // общее название логов
 const uint8_t chipSelect = SS;          // пин выбора чипа SD.  !!!!!Отключить все остальное с шины SPI!!!!!.
@@ -245,6 +255,7 @@ void setup()
   // &=~ -записать ноль, в бит n
   ADCSRA |= (1 << ADPS2);                     //Биту ADPS2 присваиваем единицу - коэффициент деления 16
   ADCSRA &= ~ ((1 << ADPS1) | (1 << ADPS0));  //Битам ADPS1 и ADPS0 присваиваем нули
+  // для сопротивления жидкости ADC7
   // си настройка таймера 2 на шим с фазовой коррекцией вывод на порт B (нога 3 ардуино) без предделител-частота 31.4 кГц
   TCCR2B |= (1<<CS20);  // делитель на 0
   TCCR2B &= ~ ((1 << CS21) | (1 << CS22)); //делитель на 0
@@ -274,7 +285,30 @@ void setup()
   //!!block_event=FanControl(); // проверка кулера
   if (block_event == blockNone) block_event= TempControlData(sensor_water);// проверка подключенного датчика температуры воды
   if (block_event == blockNone) block_event= TempControlData(sensor_vapor);// проверка подключенного датчика температуры пара
+  if (block_event == blockNone) block_event= TempControlData(sensor_flegma);// проверка подключенного датчика температуры пара
   if (block_event != blockNone) {current_state=kBlocking;}// 
+// !Включено
+  oled.init();  // инициализация
+  // --------------------------
+  // настройка скорости I2C
+  //Wire.setClock(800000L);   // макс. 800'000
+  // --------------------------
+  oled.clear();   // очистить дисплей (или буфер)
+  oled.textMode(BUF_REPLACE );
+  // --------------------------
+  oled.home();            // курсор в 0,0
+  oled.print("---State:"); 
+  oled.setCursor(0,1);
+  oled.print("Water:");   // печатай что угодно: числа, строки, float, как Serial!
+  oled.setCursor(0,2);
+  oled.print("Flegma:"); 
+  oled.setCursor(0,3);
+  oled.print("Vapor:"); 
+  oled.setCursor(0,4);
+  oled.print("PWM:");
+  oled.setCursor(0,5); 
+  oled.print("ADC:"); 
+  oled.update();
 }
 
 int computePID(float input, float sp_support, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
@@ -291,10 +325,12 @@ void writeHeader()
 { //записывем заголовок файла
   file.print(F("second")); //время
   file.print(F(",water")); //температура воды
-  file.print(F(",heater"));//мощность нагревателя , относительная
+  //!замена ниже file.print(F(",heater"));//мощность нагревателя , относительная
+   file.print(F(",flegma")); //температура после дефлегматора
   file.print(F(",vapor"));//температура пара
   file.print(F(",cooler"));//мощность вентилятора , относительная
   file.print(F(",state"));//текущее состояние
+  file.print(F(",resist"));//сопротивление
 
   
   file.println();
@@ -352,13 +388,16 @@ void DataLog (void) //TODO передавать все переменные
     file.write(',');
     file.print(temperature_water);
     file.write(',');
-    file.print(dataPID);
+    //!замена file.print(dataPID);
+    file.print(temperature_flegma);
     file.write(',');
     file.print(temperature_vapor);
     file.write(',');
     file.print(pwm);
     file.write(',');
     file.print(current_state);
+    file.write(',');
+    file.print(spirt_resistance);
     file.println();
 
     StopTimer(LOGGING_TIMER); // TODO перенести вперед
@@ -373,6 +412,7 @@ bool  GetInput(void)
   case kSendRecuest:          // отправляем запрос подготовить значение температуры
     TempSendRecuest (sensor_vapor);
     TempSendRecuest (sensor_water);
+    TempSendRecuest (sensor_flegma);
     temp_state = kGetAnsver;  // переходим в состояние получить ответ
     StartTimer(TEMPER_TIMER); //запускаем таймер
     break;
@@ -386,10 +426,27 @@ bool  GetInput(void)
           break;
         }
       if (TempGetAnsver(sensor_water, temperature_water,temperature_error_water) == 3)  {block_event =blockCrc; break;} //если ошибка возвращается 3 раза подряд, то в блок
+      if (TempGetAnsver(sensor_flegma, temperature_flegma,temperature_error_flegma) == 3)  {block_event =blockCrc; break;}
       temp_state = kSendRecuest; // переходим в состояние отправки запроса температуры
       // Выводим полученное значение температуры в монитор порта
       Serial.println(temperature_water);
       Serial.println(temperature_vapor);
+      Serial.println(temperature_flegma);
+// ! Включено
+      oled.setCursor(60,0);
+      oled.print(current_state); 
+      oled.setCursor(60,1);
+      oled.print(temperature_water);   // печатай что угодно: числа, строки, float, как Serial!
+      oled.setCursor(60,2);
+      oled.print(temperature_flegma); 
+      oled.setCursor(60,3);
+      oled.print(temperature_vapor); 
+      oled.print("<--"); 
+      oled.setCursor(60,4);
+      oled.print(setpoint_cooler);
+      oled.setCursor(60,5); 
+      oled.print(spirt_resistance); 
+      oled.update();
       //Serial.println(current_state);
       
       //---------------расчет пид регулятора
@@ -397,7 +454,7 @@ bool  GetInput(void)
       //dataPID=computePID (temperature_water,setpoint_support,2.595,0.0002036,1.297,1,0,100); // для маленького тэна на панасонике
       //!!!!!!!!!!!!!!!!!!!!dataPID=computePID (temperature_water,setpoint_support,6.656,0.001201,943.8,1,0,100); // для маленького тэна на панасонике 2
       dataPID=computePID (temperature_water,setpoint_support,35,0.1,1,1,0,100); // для маленького тэна на панасонике вручную правлю D/i/p  !!!Оставляем
-      OCR2B = setpoint_cooler; //!!!вывод на шим
+      
     }
     break;
   }
@@ -405,6 +462,7 @@ bool  GetInput(void)
   //pwm=analogRead(6); // опрос переменника для для шим
   pwm = (pwm >> 1) + (analogRead(6) >> 1);  //  Целочисленный фильтр 
   setpoint_cooler=map(pwm, 0, 1023, 10, 255); //масштабирование переменника в диапазон шим кулера
+  spirt_resistance=analogRead(7); //опрос датчика спирта
   log_on = digitalRead(BUTTON_LOG);        //опрос кнопки логгирования // TODO
   but_start = digitalRead(BUTTON_START);    //опрос кнопки старт // TODO
   //? если опрос температуры выкинуть вниз то условие выхода по ошибке можно упростить убрав строку ниже
@@ -482,6 +540,7 @@ void loop()
         Serial.print("Sleep\n");
         LED_BLOCK_ON;
         LED_RUN_ON; 
+        OCR2B = 0; //!!!вывод на шим
       }
       if (but_start) current_state = kStart; // переходим в состояние-запуска работы
   break;
@@ -493,17 +552,18 @@ void loop()
       Serial.print("Start\n");
       servoPulse(servoPin, 90);
       LED_BLOCK_OFF;
+      OCR2B = 0; //!!!вывод на шим
     }
     if (log_on) //если логгирование включено
     {
       if (CreateLogFile()) current_state = kBlocking; //если файл лога не создан, уходим по ошибке
     }
     time_before_start=millis();   // запомнить время от которого пойдет отсчет в логе
-    current_state = kMainHeat;        //уходим в первичный нагрев
-    
+    // current_state = kMainHeat;        //уходим в первичный нагрев
+    current_state = kMaintenanceTemp;
     break;
 
-  //------------------------------------------------первичный нагрев
+  //! исключен------------------------------------------------первичный нагрев
   case kMainHeat:
   // TODO алгоритм: сначала включаем реле, если температура больше уставки, то выключаем реле и уходим в поддержание температуры
   if (entry)
@@ -541,6 +601,7 @@ void loop()
       TRIAC_RELAY_ON;    // включить реле защиты симистора
       StartTimer(TRIAC_TIMER);      // запуск таймера симстора
     }
+  OCR2B = setpoint_cooler; //!!!вывод на шим
   if (timers[TRIAC_TIMER] > time_interval_triac) //очередной расчет для симистора
   {
     ResetTimer(TRIAC_TIMER);
@@ -551,7 +612,7 @@ void loop()
   
   if (temperature_water>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
   //if (temperature_water>85) current_state=kStop;   // TODO временная остановка для снятия харакеристики сэмовара
-  else if (temperature_water<75) current_state=kMainHeat;    // если недогрев то уходим на главный подогрев
+  // else if (temperature_water<75) current_state=kMainHeat;    //!исключен. если недогрев то уходим на главный подогрев
   if (log_on)  DataLog();                         //уходим в логгирование
   if (block_event!=blockNone) current_state=kBlocking;
   if (but_start == false) current_state=kStop;
@@ -577,6 +638,7 @@ void loop()
       //Serial.println("Stop");
       ResetWork ();   //сбрасываем выходы и таймеры
       if (log_on)  file.close();   // закрываем файл лога
+      OCR2B = 0; //!!!вывод на шим
     }
     current_state=kSleep; //уходим в состояние сна 
     break;
@@ -595,6 +657,7 @@ void loop()
       file.println();
       file.close(); 
       }
+      OCR2B = 0; //!!!вывод на шим
     }
     switch (block_event) // по какой причине блокировка
     {
