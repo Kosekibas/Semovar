@@ -83,8 +83,8 @@ long process_timer_interval = 10; //интервал присвоения нов
 long time_before_start = 0;     //обнуление время с которого начался режим работы
 
 // назначение кнопок
-#define BUTTON_START 2 //назначение пина кнопки старт //! (PIND&(1 << PD2)) ==1 если нажата
-#define BUTTON_LOG 5   //назначение пина кнопки логгирования //! (PIND&(1 << PD3)) ==1 если нажата!! проверить возможно pd5
+#define BUTTON_START 5 //назначение пина кнопки старт //! (PIND&(1 << PD2)) ==1 если нажата
+// #define BUTTON_LOG 5   //!исключить назначение пина кнопки логгирования //! (PIND&(1 << PD3)) ==1 если нажата!! проверить возможно pd5
 bool is_work = false;  // перешли в режим работы
 bool log_on = false;   //логгирование вклчено
 bool but_start=false;       // кнопка старт нажата
@@ -249,6 +249,7 @@ StateBlock FanControl()
 void setup()
 {
   Serial.begin(9600); 
+  
   noInterrupts();//отключить прерывания
   //си настройка АЦП
   // |= -записать единицу, не стирая другие
@@ -288,6 +289,7 @@ void setup()
   if (block_event == blockNone) block_event= TempControlData(sensor_flegma);// проверка подключенного датчика температуры пара
   if (block_event != blockNone) {current_state=kBlocking;}// 
 // !Включено
+
   oled.init();  // инициализация
   // --------------------------
   // настройка скорости I2C
@@ -305,10 +307,11 @@ void setup()
   oled.setCursor(0,3);
   oled.print("Vapor:"); 
   oled.setCursor(0,4);
-  oled.print("PWM:");
+  oled.print("PWM:");  
   oled.setCursor(0,5); 
   oled.print("ADC:"); 
   oled.update();
+    Serial.println("setup");
 }
 
 int computePID(float input, float sp_support, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
@@ -610,7 +613,7 @@ void loop()
     //!brasenham(setpoint_support); // вывод на симистор уставки с крутилки
   }
   
-  if (temperature_water>95) block_event=blockHeatMax;   // перегрев уходим в блокировку
+  if (temperature_water>98) block_event=blockHeatMax;   // перегрев уходим в блокировку
   //if (temperature_water>85) current_state=kStop;   // TODO временная остановка для снятия харакеристики сэмовара
   // else if (temperature_water<75) current_state=kMainHeat;    //!исключен. если недогрев то уходим на главный подогрев
   if (log_on)  DataLog();                         //уходим в логгирование
