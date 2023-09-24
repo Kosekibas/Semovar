@@ -82,27 +82,36 @@ long process_timer_interval = 10; //интервал присвоения нов
 #define time_interval_fan_control 200 // время в течении которого вентилятор должн ответить тахометром ~2секунды
 long time_before_start = 0;     //обнуление время с которого начался режим работы
 
-// назначение кнопок
+// ВХОДЫ 
 #define BUTTON_START 5 //назначение пина кнопки старт //! (PIND&(1 << PD2)) ==1 если нажата
-// #define BUTTON_LOG 5   //!исключить назначение пина кнопки логгирования //! (PIND&(1 << PD3)) ==1 если нажата!! проверить возможно pd5
+#define BUTTON_NEXT 6
+#define BUTTON_BACK 4
+
 bool is_work = false;  // перешли в режим работы
 bool log_on = false;   //логгирование вклчено
 bool but_start=false;       // кнопка старт нажата
-// ШИМ
-//#define PWM_OUT 3 //назначение пина шим 
-#define PWM_OUT OCR2B // регистр шим то выдается на ногу
-#define PWM_IS_STOP (PINC &(1<<PC3))==0 // Если тахометр  выдает сигнал
+
+#define PWM_FAN 3
+#define PWM_OUT OCR2B // регистр шим выдается на ногу
 
 int pwm=0;              // вход переменного резистора
-int spirt_resistance=0;              // вход сопротивления спирта
-//----------------------------- Главный нагреватель
-//#define MAIN_HEATER 6   //назначение пина реле главного нагревателя
-#define MAIN_HEATER_ON (PORTD |= (1<<PD6)) // на си включение реле нагрева, 
-#define MAIN_HEATER_OFF (PORTD &= ~(1<<PD6)) //отключение реле нагрева
 
+// ВыХОДЫ
+#define LED_BLOCK_ON (PORTD |= (1<<PD7))
+#define LED_BLOCK_OFF (PORTD &= ~(1<<PD7)) 
+
+#define ADC_SPIRTOMETR A7
+#define ADC_POTENTIOMETR A6
+
+#define RELE_DEF_ON (PORTC |= (1<<PC0))
+#define RELE_DEF_OFF (PORTC &= ~(1<<PC0))
+#define RELE_HOL_ON (PORTC |= (1<<PC1))
+#define RELE_HOL_OFF (PORTC &= ~(1<<PC1))
+
+int spirt_resistance=0;              // данные сопротивления спирта
 //----------------------------- сервопривод
+#define SERVO =9            // порт подключения сервы
 int out_servo=0; // установка положения сервопривода в градусах
-int servoPin = 9;            // порт подключения сервы
 int pulseWidth;              // длительность импульса
 //----------------------------- управление симистором
 int setpoint_support=94;	// уставка поддержания температуры 88
@@ -111,19 +120,11 @@ int setpoint_cooler=0x30; //уставка охладителя
 int modulator=0;	// рабочая переменная
 int er=50;        // ошибка
 int dataPID=0;
-//#define RELAY 4   //назначение пина реле защиты симистра
-#define TRIAC_RELAY_ON (PORTD |= (1<<PD4)) // на си включение реле защиты симистра, 
-#define TRIAC_RELAY_OFF (PORTD &= ~(1<<PD4)) //отключение реле защиты симистра
-#define TRIAC_ON (PORTC |= (1<<PC0)) // на си включение тиристора, 
-#define TRIAC_OFF (PORTC &= ~(1<<PC0)) //отключение тиристора
-#define LED_BLOCK_ON (PORTC |= (1<<PC1))
-#define LED_BLOCK_OFF (PORTC &= ~(1<<PC1)) 
-#define LED_RUN_ON (PORTC |= (1<<PC2))
-#define LED_RUN_OFF (PORTC &= ~(1<<PC2))
+
 //-------------------------------переменные датчика температуры
-OneWire sensor_water(8);         // Создаем объект OneWire для шины 1-Wire, с помощью которого будет осуществляться работа с датчиком
-OneWire sensor_vapor(7);         // датчик пара
-OneWire sensor_flegma(A3);         // датчик флегмы
+OneWire sensor_water(2);         // Создаем объект OneWire для шины 1-Wire, с помощью которого будет осуществляться работа с датчиком
+OneWire sensor_vapor(A2);         // датчик пара
+OneWire sensor_flegma(A3);       // датчик флегмы
 enum TempCommunication //состояния общения с датчиком
 {
   kSendRecuest, //передать запрос
@@ -182,7 +183,7 @@ void ResetTimer(byte Timer) // сбросить таймер
     timers[Timer] = 0;
 }
 
-StateBlock TempControlData (OneWire& ds) 
+StateBlock TempControlData (OneWire& ds)  
 {
   byte temp_code[8]; //массив информации датчика температуры
   ds.reset();
@@ -222,29 +223,29 @@ byte  TempGetAnsver (OneWire& ds, float &temperature, byte error)
   temperature = ((data[1] << 8) | data[0]) * 0.0625;
   return error;
 }
-StateBlock FanControl()
+StateBlock FanControl(\
 {
   //TODO срабатывает при малейшем импульсе. а хотелось бы при определенных оборотах
 // запускаем кулер на максимум, ждем пока придет ответ в течении времени, если ответа нет, то ошибка по кулеру
-  if (PWM_IS_STOP==0) return blockFan;
-  else  {
-    PWM_OUT=0xFF; //на максимум
-    delay(200);
-    StartTimer(FAN_CONTROL_TIMER);
-    while (PWM_IS_STOP)
-    {
-      LED_RUN_ON;
-      if(timers[FAN_CONTROL_TIMER] > time_interval_fan_control)   
-      {
-        StopTimer(FAN_CONTROL_TIMER);
-        return blockFan;
-      }
-    }
-    StopTimer(FAN_CONTROL_TIMER);
-    PWM_OUT=0x00; //отключает шим
-    LED_RUN_OFF;
-    return blockNone; 
-    }
+  // if (PWM_IS_STOP==0) return blockFan;
+  // else  {
+  //   PWM_OUT=0xFF; //на максимум
+  //   delay(200);
+  //   StartTimer(FAN_CONTROL_TIMER);
+  //   while (PWM_IS_STOP)
+  //   {
+  //     LED_RUN_ON;
+  //     if(timers[FAN_CONTROL_TIMER] > time_interval_fan_control)   
+  //     {
+  //       StopTimer(FAN_CONTROL_TIMER);
+  //       return blockFan;
+  //     }
+  //   }
+  //   StopTimer(FAN_CONTROL_TIMER);
+  //   PWM_OUT=0x00; //отключает шим
+  //   LED_RUN_OFF;
+  //   return blockNone; 
+  //   }
 }
 void setup()
 {
@@ -261,23 +262,28 @@ void setup()
   TCCR2B |= (1<<CS20);  // делитель на 0
   TCCR2B &= ~ ((1 << CS21) | (1 << CS22)); //делитель на 0
   TCCR2A |= (1<<COM2B1) | (1<<WGM20); // задействуем выход B TCNT2 это PD3, 3 нога ардуины / шим с коррекцией фазы 
-  // PD3,DP4 на выход
-  DDRD |=(1<<DDD3) | (1<<DDD4) | (1<<DDD6); 
-  MAIN_HEATER_OFF;   // выключает реле
-  TRIAC_RELAY_OFF;  // выключает реле
   OCR2B= 0; //начальное значение на шим
-  // выставляем А0,A1,A2 как цифровой выход
-  DDRC |= (1 << DDC0) | (1 << DDC1)| (1 << DDC2);
-  TRIAC_OFF; // отключить симистр
-  LED_RUN_OFF;
+  // PD7 на выход
+  DDRD |=(1<<DDD7); 
   LED_BLOCK_OFF;
+ 
+  // выставляем А0,A1, как цифровой выход
+  DDRC |= (1 << DDC0) | (1 << DDC1);
+  RELE_DEF_OFF;
+  RELE_HOL_OFF;
   interrupts();//включить прерывания
+
   DDRC &=~(1 << DDC3); //A3 на вход
   PORTC &=~(1<<PORTC3); //A3 без подтяжки
+  DDRC &=~(1 << DDC2); //A2 на вход
+  PORTC &=~(1<<PORTC2); //A2 без подтяжки
+  DDRD &=~(1 << DDD2); //D2 на вход
+  PORTD &=~(1<<PORTD2); //D2 без подтяжки
 
   pinMode(BUTTON_START, INPUT);
-  pinMode(BUTTON_LOG, INPUT);
-  pinMode(servoPin, OUTPUT);          // пин сервы, как выход
+  pinMode(BUTTON_NEXT, INPUT);
+  pinMode(BUTTON_BACK, INPUT);
+  pinMode(SERVO, OUTPUT);          // пин сервы, как выход
   
   previous_state =kNull;
   current_state = kSleep; // первое состояние- сон
